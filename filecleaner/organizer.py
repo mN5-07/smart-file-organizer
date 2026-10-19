@@ -46,6 +46,8 @@ EXTENSION_MAPPING = {
     '.txt': 'Documents',
     '.rtf': 'Documents',
     '.odt': 'Documents',
+    '.md': 'Documents',
+    '.markdown': 'Documents',
 
     '.xlsx': 'Spreadsheets',
     '.xls': 'Spreadsheets',
@@ -83,6 +85,8 @@ EXTENSION_MAPPING = {
     '.java': 'Code',
     '.cpp': 'Code',
     '.json': 'Code',
+    '.ipynb': 'Code',
+    '.ipynb_checkpoints': 'Code',
 }
 
 # Run basic unit tests to verify the functionality of the type_check function then go back and deal with edge cases and other scenarios.
@@ -116,6 +120,7 @@ def type_check(filename):
 
 
 def placement(filepath):
+    # Python's pathlib.Path is designed specifically for working with filesystem paths. It can make path manipulation more expressive and reduce the need to manually combine path strings
     '''
     Purpose: accepts a directory path and determines where its files should go
     Preconditions:
@@ -139,10 +144,15 @@ def placement(filepath):
     # Identify files in the directory (don't recurse into subdirectories for now)
     directory_contents = os.listdir(directory_path)
     for item in directory_contents:
+        if item.lower() == "desktop.ini":
+            continue
         item_path = os.path.join(directory_path, item) # example C:\Users\user\Documents\vacation.jpg
         if os.path.isfile(item_path):
             category = type_check(item)
             # Categorize each file
+            # TODO: Should the planner include files already inside category folders?
+            # TODO: Should it move a file if its source is already in its intended destination?
+            # TODO: How should it handle a destination filename that already exists?
             destination_folder = os.path.join(directory_path, category)
             destination_path = os.path.join(destination_folder, item)
             if category not in file_categories:
@@ -154,3 +164,100 @@ def placement(filepath):
     # Calculate the proposed destination paths
     return file_categories
 
+
+def move_files(file_plans, dry_run=False):
+    """
+    Move planned files to their destinations and report the results.
+
+    Returns:
+        A dictionary containing:
+        - moved: files successfully moved
+        - skipped: files intentionally not moved
+        - failed: files that encountered errors
+        - planned: files that would be moved during a dry run
+        - dry_run: whether this was a dry run
+    """
+    results = {
+        "moved": [],
+        "skipped": [],
+        "failed": [],
+        "planned": [],
+        "dry_run": dry_run,
+    }
+
+    for category, files in file_plans.items():
+        for file_info in files:
+            source = file_info["source"]
+            destination = file_info["destination"]
+
+            # Handle the dry run without changing the filesystem.
+            if dry_run:
+                results["planned"].append({
+                    "source": source,
+                    "destination": destination,
+                })
+                print(f"[DRY RUN] Would move: {source} -> {destination}")
+                continue
+
+            try:
+                # The source might have disappeared since planning.
+                if not os.path.isfile(source):
+                    results["skipped"].append({
+                        "source": source,
+                        "destination": destination,
+                        "reason": "Source file does not exist",
+                    })
+                    continue
+
+                # Never intentionally overwrite an existing destination.
+                if os.path.exists(destination):
+                    results["skipped"].append({
+                        "source": source,
+                        "destination": destination,
+                        "reason": "Destination already exists",
+                    })
+                    continue
+
+                # Create the destination folder if necessary.
+                os.makedirs(
+                    os.path.dirname(destination),
+                    exist_ok=True,
+                )
+
+                # Move the file.
+                os.rename(source, destination)
+
+                results["moved"].append({
+                    "source": source,
+                    "destination": destination,
+                })
+                print(f"Moved: {source} -> {destination}")
+
+            except OSError as error:
+                # Handle filesystem errors without stopping other files.
+                results["failed"].append({
+                    "source": source,
+                    "destination": destination,
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                })
+                print(f"Failed to move {source}: {error}")
+
+    return results
+
+
+'''
+Requirement 4: Handle errors
+Consider what should happen if:
+- A source file disappears after planning.
+- A file cannot be moved because of permissions.
+- A destination directory cannot be created.
+- A destination already exists.
+Your function should handle foreseeable filesystem errors without unnecessarily crashing the entire operation.
+Requirement 5: Report results
+The caller should be able to determine:
+- Which files were moved.
+- Which files were skipped.
+- Which operations failed.
+- Whether the run was a dry run.
+'''

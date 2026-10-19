@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from filecleaner.organizer import type_check, placement
+from filecleaner.organizer import move_files, type_check, placement
 
 
 # -------------------------
@@ -318,3 +318,345 @@ def test_placement_source_and_destination_are_distinct(tmp_path):
     assert file_info["source"] != file_info["destination"]
     assert os.path.isfile(file_info["source"])
     assert not os.path.exists(file_info["destination"])
+
+
+# -------------------------
+# move_files tests
+# -------------------------
+
+from unittest.mock import patch
+
+
+def test_move_files_moves_file_successfully(tmp_path):
+    source = tmp_path / "vacation.jpg"
+    destination = tmp_path / "Images" / "vacation.jpg"
+    source.write_text("dummy content")
+
+    plans = {
+        "Images": [{
+            "source": str(source),
+            "destination": str(destination),
+        }]
+    }
+
+    results = move_files(plans)
+
+    assert not source.exists()
+    assert destination.is_file()
+    assert destination.read_text() == "dummy content"
+
+    assert len(results["moved"]) == 1
+    assert results["moved"][0]["source"] == str(source)
+    assert results["moved"][0]["destination"] == str(destination)
+
+    assert results["skipped"] == []
+    assert results["failed"] == []
+    assert results["dry_run"] is False
+
+def test_move_files_source_equals_destination(tmp_path):
+    source = tmp_path / "photo.jpg"
+    source.write_text("image content")
+
+    plans = {
+        "Images": [{
+            "source": str(source),
+            "destination": str(source),
+        }]
+    }
+
+    results = move_files(plans)
+
+    assert source.is_file()
+    assert results["moved"] == []
+    assert len(results["skipped"]) == 1
+
+def test_move_files_existing_destination_directory(tmp_path):
+    source = tmp_path / "photo.jpg"
+    destination_dir = tmp_path / "Images"
+    destination_dir.mkdir()
+
+    destination = destination_dir / "photo.jpg"
+    source.write_text("image content")
+
+    plans = {
+        "Images": [{
+            "source": str(source),
+            "destination": str(destination),
+        }]
+    }
+
+    results = move_files(plans)
+
+    assert not source.exists()
+    assert destination.read_text() == "image content"
+    assert len(results["moved"]) == 1
+    assert results["failed"] == []
+
+def test_move_files_dry_run_does_not_change_filesystem(tmp_path):
+    source = tmp_path / "report.pdf"
+    destination = tmp_path / "Documents" / "report.pdf"
+
+    source.write_text("Test content")
+
+    plans = {
+        "Documents": [
+            {
+                "source": str(source),
+                "destination": str(destination),
+            }
+        ]
+    }
+
+    results = move_files(plans, dry_run=True)
+
+    # The source remains untouched.
+    assert source.is_file()
+    assert source.read_text() == "Test content"
+
+    # No destination file or directory is created.
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+    # The result correctly identifies this as a dry run.
+    assert results["dry_run"] is True
+    assert results["moved"] == []
+    assert results["skipped"] == []
+    assert results["failed"] == []
+
+    # The planned move is reported.
+    assert len(results["planned"]) == 1
+    assert results["planned"][0]["source"] == str(source)
+    assert results["planned"][0]["destination"] == str(destination)
+
+
+def test_move_files_source_disappears_after_planning(tmp_path):
+    # Arrange: create two files to organize.
+    report = tmp_path / "report.pdf"
+    photo = tmp_path / "vacation.jpg"
+
+    report.write_text("Report content")
+    photo.write_text("Photo content")
+
+    # Create the plan while both files exist.
+    plans = placement(str(tmp_path))
+
+    # Simulate the user deleting the report after planning.
+    report.unlink()
+
+    # Act: execute the now-outdated plan.
+    results = move_files(plans)
+
+    # Assert: the missing report is skipped.
+    assert len(results["skipped"]) == 1
+    assert results["skipped"][0]["source"] == str(report)
+    assert results["skipped"][0]["reason"] == "Source file does not exist"
+
+    # Assert: the photo is still moved successfully.
+    photo_destination = tmp_path / "Images" / "vacation.jpg"
+
+    assert len(results["moved"]) == 1
+    assert results["moved"][0]["source"] == str(photo)
+    assert results["moved"][0]["destination"] == str(photo_destination)
+    assert photo_destination.read_text() == "Photo content"
+
+    # Confirm the final filesystem state.
+    assert not report.exists()
+    assert not photo.exists()
+    assert results["failed"] == []
+
+def test_move_files_missing_source_is_skipped(tmp_path):
+    source = tmp_path / "missing.txt"
+    destination = tmp_path / "Documents" / "missing.txt"
+
+    plans = {
+        "Documents": [{
+            "source": str(source),
+            "destination": str(destination),
+        }]
+    }
+
+    results = move_files(plans)
+
+    assert len(results["skipped"]) == 1
+    assert results["skipped"][0]["source"] == str(source)
+    assert results["skipped"][0]["reason"] == (
+        "Source file does not exist"
+    )
+
+    assert results["moved"] == []
+    assert results["failed"] == []
+    assert not destination.exists()
+
+
+def test_move_files_existing_destination_is_skipped(tmp_path):
+    source = tmp_path / "report.pdf"
+    destination_dir = tmp_path / "Documents"
+    destination_dir.mkdir()
+
+    destination = destination_dir / "report.pdf"
+
+    source.write_text("New report")
+    destination.write_text("Existing report")
+
+    plans = {
+        "Documents": [{
+            "source": str(source),
+            "destination": str(destination),
+        }]
+    }
+
+    results = move_files(plans)
+
+    assert len(results["skipped"]) == 1
+    assert results["skipped"][0]["reason"] == (
+        "Destination already exists"
+    )
+
+    assert source.read_text() == "New report"
+    assert destination.read_text() == "Existing report"
+
+    assert results["moved"] == []
+    assert results["failed"] == []
+
+
+def test_move_files_permission_error_is_recorded(tmp_path):
+    source = tmp_path / "report.pdf"
+    destination = tmp_path / "Documents" / "report.pdf"
+    source.write_text("Test content")
+
+    plans = {
+        "Documents": [{
+            "source": str(source),
+            "destination": str(destination),
+        }]
+    }
+
+    with patch(
+        "filecleaner.organizer.os.rename",
+        side_effect=PermissionError("Permission denied"),
+    ):
+        results = move_files(plans)
+
+    assert len(results["failed"]) == 1
+    assert results["failed"][0]["source"] == str(source)
+    assert results["failed"][0]["error_type"] == "PermissionError"
+    assert "Permission denied" in results["failed"][0]["error"]
+
+    assert results["moved"] == []
+    assert results["skipped"] == []
+
+    assert source.is_file()
+    assert not destination.exists()
+
+
+def test_move_files_continues_after_one_file_fails(tmp_path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+
+    first.write_text("First file")
+    second.write_text("Second file")
+
+    first_destination = tmp_path / "Documents" / "first.txt"
+    second_destination = tmp_path / "Documents" / "second.txt"
+
+    plans = {
+        "Documents": [
+            {
+                "source": str(first),
+                "destination": str(first_destination),
+            },
+            {
+                "source": str(second),
+                "destination": str(second_destination),
+            },
+        ]
+    }
+
+    real_rename = os.rename
+
+    def rename_with_one_failure(src, dst):
+        if src == str(first):
+            raise PermissionError("Permission denied")
+
+        return real_rename(src, dst)
+
+    with patch(
+        "filecleaner.organizer.os.rename",
+        side_effect=rename_with_one_failure,
+    ):
+        results = move_files(plans)
+
+    assert len(results["failed"]) == 1
+    assert results["failed"][0]["source"] == str(first)
+
+    assert len(results["moved"]) == 1
+    assert results["moved"][0]["source"] == str(second)
+    assert second_destination.is_file()
+
+    assert first.is_file()
+    assert not second.exists()
+    assert results["skipped"] == []
+
+
+# Add a test for destination-directory creation failures to ensure your error-handling requirements are covered.
+def test_move_files_destination_creation_failure(tmp_path):
+    source = tmp_path / "report.pdf"
+    destination_dir = tmp_path / "Documents"
+    destination = destination_dir / "report.pdf"
+
+    source.write_text("Test content")
+
+    plans = {
+        "Documents": [{
+            "source": str(source),
+            "destination": str(destination),
+        }]
+    }
+
+    with patch(
+        "filecleaner.organizer.os.makedirs",
+        side_effect=PermissionError("Permission denied"),
+    ):
+        results = move_files(plans)
+
+    assert len(results["failed"]) == 1
+    assert results["failed"][0]["source"] == str(source)
+    assert results["failed"][0]["error_type"] == "PermissionError"
+    assert "Permission denied" in results["failed"][0]["error"]
+
+    assert results["moved"] == []
+    assert results["skipped"] == []
+
+    assert source.is_file()
+    assert not destination.exists()
+
+
+def test_placement_excludes_desktop_ini_and_includes_regular_files(
+    tmp_path,
+):
+    # Create desktop.ini with different capitalization.
+    desktop_ini = tmp_path / "desktop.ini"
+    desktop_ini.touch()
+
+    uppercase_desktop_ini = tmp_path / "DESKTOP.INI"
+    uppercase_desktop_ini.touch()
+
+    # Create a regular file that should be included.
+    photo = tmp_path / "vacation.jpg"
+    photo.touch()
+
+    result = placement(str(tmp_path))
+
+    all_sources = {
+        item["source"]
+        for files in result.values()
+        for item in files
+    }
+
+    # Neither version of desktop.ini should be planned for movement.
+    assert str(desktop_ini) not in all_sources
+    assert str(uppercase_desktop_ini) not in all_sources
+
+    # Regular files should still be included.
+    assert str(photo) in all_sources
+    assert type_check("vacation.jpg") == "Images"
